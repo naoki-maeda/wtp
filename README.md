@@ -188,7 +188,7 @@ wtp list
 # ../project-hotfix         hotfix/urgent    abc12345
 
 # Remove worktree only (by worktree name)
-wtp remove feature/auth
+wtp remove feature/auth  # Also runs configured pre_remove / post_remove hooks
 wtp remove --force feature/auth  # Force removal even if dirty
 
 # Remove worktree and its branch
@@ -236,6 +236,17 @@ hooks:
     - type: command
       command: "make db:setup"
       work_dir: "."
+
+  pre_remove:
+    # Back up files from the worktree being removed into the main worktree
+    - type: copy
+      from: ".env"
+      to: "backups/.env"
+
+  post_remove:
+    # Run cleanup commands from the main worktree after removal
+    - type: command
+      command: "make cleanup-worktrees"
 ```
 
 ### Copy Hooks: Main Worktree Reference
@@ -269,6 +280,32 @@ hooks:
 
 This behavior applies regardless of where you run `wtp add` from (main worktree
 or any other worktree).
+
+### Remove Hooks
+
+Remove hooks let you back up local files before deletion and run cleanup after
+deletion.
+
+- `pre_remove`: `from` is resolved relative to the worktree being removed, `to`
+  is resolved relative to the main worktree, and commands default to the main
+  worktree as `work_dir`.
+- `post_remove`: `from`, `to`, and command `work_dir` are all resolved relative
+  to the main worktree.
+  For `copy` hooks in `post_remove`, set `to` explicitly.
+
+Example:
+
+```yaml
+hooks:
+  pre_remove:
+    - type: copy
+      from: ".env"
+      to: "backups/feature-auth.env"
+
+  post_remove:
+    - type: command
+      command: "echo cleaned up"
+```
 
 ### Symlink Hooks: Shared Assets
 

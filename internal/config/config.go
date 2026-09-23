@@ -21,9 +21,11 @@ type Defaults struct {
 	BaseDir string `yaml:"base_dir,omitempty"`
 }
 
-// Hooks represents the post-create hooks configuration
+// Hooks represents the configured lifecycle hooks.
 type Hooks struct {
 	PostCreate []Hook `yaml:"post_create,omitempty"`
+	PreRemove  []Hook `yaml:"pre_remove,omitempty"`
+	PostRemove []Hook `yaml:"post_remove,omitempty"`
 }
 
 // Hook represents a single hook configuration
@@ -127,19 +129,43 @@ func (c *Config) ApplyDefaults() {
 		c.Defaults.BaseDir = DefaultBaseDir
 	}
 
-	for i := range c.Hooks.PostCreate {
-		c.Hooks.PostCreate[i].ApplyDefaults()
-	}
+	applyHookDefaults(c.Hooks.PostCreate, false)
+	applyHookDefaults(c.Hooks.PreRemove, false)
+	applyHookDefaults(c.Hooks.PostRemove, true)
 }
 
 // Validate validates the configuration without mutating it.
 func (c *Config) Validate() error {
-	for i := range c.Hooks.PostCreate {
-		if err := c.Hooks.PostCreate[i].Validate(); err != nil {
-			return fmt.Errorf("invalid hook %d: %w", i+1, err)
+	if err := validateHooks("post_create", c.Hooks.PostCreate, false); err != nil {
+		return err
+	}
+	if err := validateHooks("pre_remove", c.Hooks.PreRemove, false); err != nil {
+		return err
+	}
+	if err := validateHooks("post_remove", c.Hooks.PostRemove, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyHookDefaults(hooks []Hook, requireExplicitCopyTo bool) {
+	for i := range hooks {
+		if requireExplicitCopyTo && hooks[i].Type == HookTypeCopy {
+			continue
+		}
+		hooks[i].ApplyDefaults()
+	}
+}
+
+func validateHooks(name string, hooks []Hook, requireExplicitCopyTo bool) error {
+	for i := range hooks {
+		if requireExplicitCopyTo && hooks[i].Type == HookTypeCopy && hooks[i].To == "" {
+			return fmt.Errorf("invalid %s hook %d: copy hook requires 'to' field", name, i+1)
+		}
+		if err := hooks[i].Validate(); err != nil {
+			return fmt.Errorf("invalid %s hook %d: %w", name, i+1, err)
 		}
 	}
-
 	return nil
 }
 
@@ -192,9 +218,24 @@ func (h *Hook) Validate() error {
 	return nil
 }
 
-// HasHooks returns true if the configuration has any post-create hooks
+// HasHooks returns true if the configuration has any hooks.
 func (c *Config) HasHooks() bool {
+	return c.HasPostCreateHooks() || c.HasPreRemoveHooks() || c.HasPostRemoveHooks()
+}
+
+// HasPostCreateHooks returns true when post-create hooks are configured.
+func (c *Config) HasPostCreateHooks() bool {
 	return len(c.Hooks.PostCreate) > 0
+}
+
+// HasPreRemoveHooks returns true when pre-remove hooks are configured.
+func (c *Config) HasPreRemoveHooks() bool {
+	return len(c.Hooks.PreRemove) > 0
+}
+
+// HasPostRemoveHooks returns true when post-remove hooks are configured.
+func (c *Config) HasPostRemoveHooks() bool {
+	return len(c.Hooks.PostRemove) > 0
 }
 
 // ResolveWorktreePath resolves the full path for a worktree given a name

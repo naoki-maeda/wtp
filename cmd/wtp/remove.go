@@ -16,6 +16,7 @@ import (
 	"github.com/satococoa/wtp/v2/internal/config"
 	"github.com/satococoa/wtp/v2/internal/errors"
 	"github.com/satococoa/wtp/v2/internal/git"
+	"github.com/satococoa/wtp/v2/internal/hooks"
 )
 
 // Variable to allow mocking in tests
@@ -116,6 +117,9 @@ func removeCommandWithCommandExecutor(
 		return err
 	}
 
+	mainWorktreePath := getMainWorktreePath(worktrees)
+	cfg := loadRemoveConfig(mainWorktreePath)
+
 	absTargetPath, err := filepath.Abs(targetWorktree.Path)
 	if err != nil {
 		return errors.WorktreeRemovalFailed(targetWorktree.Path, err)
@@ -130,21 +134,15 @@ func removeCommandWithCommandExecutor(
 		return errors.CannotRemoveCurrentWorktree(worktreeName, absTargetPath)
 	}
 
-	// Remove worktree using CommandExecutor
-	removeCmd := command.GitWorktreeRemove(targetWorktree.Path, force)
-	result, err = executor.Execute([]command.Command{removeCmd})
-	if err != nil {
-		return errors.WorktreeRemovalFailed(targetWorktree.Path, err)
+	if err := executePreRemoveHooks(w, cfg, mainWorktreePath, targetWorktree.Path); err != nil {
+		return err
 	}
-	if len(result.Results) > 0 && result.Results[0].Error != nil {
-		gitOutput := result.Results[0].Output
-		if gitOutput != "" {
-			combinedError := fmt.Errorf("%w: %s", result.Results[0].Error, gitOutput)
-			return errors.WorktreeRemovalFailed(targetWorktree.Path, combinedError)
-		}
-		return errors.WorktreeRemovalFailed(targetWorktree.Path, result.Results[0].Error)
+
+	if err := removeWorktreeWithCommandExecutor(w, executor, worktreeName, targetWorktree.Path, force); err != nil {
+		return err
 	}
-	if _, err := fmt.Fprintf(w, "Removed worktree '%s' at %s\n", worktreeName, targetWorktree.Path); err != nil {
+
+	if err := executePostRemoveHooks(w, cfg, mainWorktreePath, targetWorktree.Path); err != nil {
 		return err
 	}
 
@@ -185,6 +183,30 @@ func isPathWithin(basePath, targetPath string) bool {
 	return true
 }
 
+func removeWorktreeWithCommandExecutor(
+	w io.Writer,
+	executor command.Executor,
+	worktreeName string,
+	worktreePath string,
+	force bool,
+) error {
+	removeCmd := command.GitWorktreeRemove(worktreePath, force)
+	result, err := executor.Execute([]command.Command{removeCmd})
+	if err != nil {
+		return errors.WorktreeRemovalFailed(worktreePath, err)
+	}
+	if len(result.Results) > 0 && result.Results[0].Error != nil {
+		gitOutput := result.Results[0].Output
+		if gitOutput != "" {
+			combinedError := fmt.Errorf("%w: %s", result.Results[0].Error, gitOutput)
+			return errors.WorktreeRemovalFailed(worktreePath, combinedError)
+		}
+		return errors.WorktreeRemovalFailed(worktreePath, result.Results[0].Error)
+	}
+	_, err = fmt.Fprintf(w, "Removed worktree '%s' at %s\n", worktreeName, worktreePath)
+	return err
+}
+
 func removeBranchWithCommandExecutor(
 	w io.Writer,
 	executor command.Executor,
@@ -206,6 +228,81 @@ func removeBranchWithCommandExecutor(
 	}
 	_, err = fmt.Fprintf(w, "Removed branch '%s'\n", branchName)
 	return err
+}
+
+func getMainWorktreePath(worktrees []git.Worktree) string {
+	for _, wt := range worktrees {
+		if wt.IsMain {
+			return wt.Path
+		}
+	}
+	return ""
+}
+
+// loadRemoveConfig falls back to the default config when .wtp.yml cannot be loaded,
+// so that removal keeps working with a broken config (hooks are skipped).
+func loadRemoveConfig(mainWorktreePath string) *config.Config {
+	if mainWorktreePath == "" {
+		return defaultRemoveConfig()
+	}
+
+	cfg, err := config.LoadConfig(mainWorktreePath)
+	if err != nil {
+		return defaultRemoveConfig()
+	}
+	return cfg
+}
+
+func defaultRemoveConfig() *config.Config {
+	return &config.Config{
+		Version: config.CurrentVersion,
+		Defaults: config.Defaults{
+			BaseDir: config.DefaultBaseDir,
+		},
+		Hooks: config.Hooks{},
+	}
+}
+
+func executePreRemoveHooks(w io.Writer, cfg *config.Config, repoPath, worktreePath string) error {
+	if !cfg.HasPreRemoveHooks() {
+		return nil
+	}
+
+	if _, err := fmt.Fprintln(w, "\nExecuting pre-remove hooks..."); err != nil {
+		return err
+	}
+
+	executor := hooks.NewExecutor(cfg, repoPath)
+	if err := executor.ExecutePreRemoveHooks(w, worktreePath); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintln(w, "✓ All hooks executed successfully"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func executePostRemoveHooks(w io.Writer, cfg *config.Config, repoPath, worktreePath string) error {
+	if !cfg.HasPostRemoveHooks() {
+		return nil
+	}
+
+	if _, err := fmt.Fprintln(w, "\nExecuting post-remove hooks..."); err != nil {
+		return err
+	}
+
+	executor := hooks.NewExecutor(cfg, repoPath)
+	if err := executor.ExecutePostRemoveHooks(w, worktreePath); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintln(w, "✓ All hooks executed successfully"); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func findTargetWorktreeFromList(worktrees []git.Worktree, worktreeName string) (*git.Worktree, error) {

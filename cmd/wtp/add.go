@@ -398,7 +398,7 @@ Original error: %v`, e.Reference, e.Reference, e.Reference, e.Reference, e.GitEr
 }
 
 func executePostCreateHooks(w io.Writer, cfg *config.Config, repoPath, workTreePath string) error {
-	if cfg.HasHooks() {
+	if cfg.HasPostCreateHooks() {
 		if _, err := fmt.Fprintln(w, "\nExecuting post-create hooks..."); err != nil {
 			return err
 		}

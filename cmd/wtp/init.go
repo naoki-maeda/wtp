@@ -104,6 +104,20 @@ hooks:
     #   command: npm install
     # - type: command
     #   command: echo "Created new worktree!"
+
+  # Hooks that run before removing a worktree
+  pre_remove:
+    # Example: Back up a local file from the worktree into the main repo
+    # Note: 'from' is relative to the worktree being removed, 'to' is relative to the main worktree
+    # - type: copy
+    #   from: .env
+    #   to: backups/.env
+
+  # Hooks that run after removing a worktree
+  post_remove:
+    # Example: Run cleanup tasks from the main worktree
+    # - type: command
+    #   command: echo "Removed worktree and cleaned up"
 `
 
 	if err := ensureWritableDirectory(repo.Path()); err != nil {

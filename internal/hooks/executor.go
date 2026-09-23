@@ -1,4 +1,4 @@
-// Package hooks handles executing post-create hooks for worktrees.
+// Package hooks handles executing lifecycle hooks for worktrees.
 package hooks
 
 import (
@@ -33,24 +33,52 @@ func NewExecutor(cfg *config.Config, repoRoot string) *Executor {
 	}
 }
 
-// ExecutePostCreateHooks executes all post-create hooks and streams output to writer
+// ExecutePostCreateHooks executes all post-create hooks and streams output to writer.
 func (e *Executor) ExecutePostCreateHooks(w io.Writer, worktreePath string) error {
-	if e.config == nil || !e.config.HasHooks() {
+	if e.config == nil {
+		return nil
+	}
+	return e.executeHooks(w, e.config.Hooks.PostCreate, e.repoRoot, worktreePath, worktreePath, worktreePath)
+}
+
+// ExecutePreRemoveHooks executes all pre-remove hooks and streams output to writer.
+func (e *Executor) ExecutePreRemoveHooks(w io.Writer, worktreePath string) error {
+	if e.config == nil {
+		return nil
+	}
+	return e.executeHooks(w, e.config.Hooks.PreRemove, worktreePath, e.repoRoot, e.repoRoot, worktreePath)
+}
+
+// ExecutePostRemoveHooks executes all post-remove hooks and streams output to writer.
+func (e *Executor) ExecutePostRemoveHooks(w io.Writer, worktreePath string) error {
+	if e.config == nil {
+		return nil
+	}
+	return e.executeHooks(w, e.config.Hooks.PostRemove, e.repoRoot, e.repoRoot, e.repoRoot, worktreePath)
+}
+
+func (e *Executor) executeHooks(
+	w io.Writer,
+	hooks []config.Hook,
+	sourceBase string,
+	destinationBase string,
+	defaultWorkDir string,
+	worktreePath string,
+) error {
+	if e.config == nil || len(hooks) == 0 {
 		return nil
 	}
 
-	totalHooks := len(e.config.Hooks.PostCreate)
-	for i, hook := range e.config.Hooks.PostCreate {
-		// Log which hook is starting
+	totalHooks := len(hooks)
+	for i, hook := range hooks {
 		if _, err := fmt.Fprintf(w, "\n→ Running hook %d of %d...\n", i+1, totalHooks); err != nil {
 			return err
 		}
 
-		if err := e.executeHookWithWriter(w, &hook, worktreePath); err != nil {
+		if err := e.executeHookWithWriter(w, &hook, sourceBase, destinationBase, defaultWorkDir, worktreePath); err != nil {
 			return fmt.Errorf("failed to execute hook %d: %w", i+1, err)
 		}
 
-		// Log successful completion
 		if _, err := fmt.Fprintf(w, "✓ Hook %d completed\n", i+1); err != nil {
 			return err
 		}
@@ -59,42 +87,52 @@ func (e *Executor) ExecutePostCreateHooks(w io.Writer, worktreePath string) erro
 	return nil
 }
 
-// executeHookWithWriter executes a single hook with output directed to writer
-func (e *Executor) executeHookWithWriter(w io.Writer, hook *config.Hook, worktreePath string) error {
+// executeHookWithWriter executes a single hook with output directed to writer.
+func (e *Executor) executeHookWithWriter(
+	w io.Writer,
+	hook *config.Hook,
+	sourceBase string,
+	destinationBase string,
+	defaultWorkDir string,
+	worktreePath string,
+) error {
 	switch hook.Type {
 	case config.HookTypeCopy:
-		return e.executeCopyHookWithWriter(w, hook, worktreePath)
+		return e.executeCopyHookWithWriter(w, hook, sourceBase, destinationBase)
 	case config.HookTypeCommand:
-		return e.executeCommandHookWithWriter(w, hook, worktreePath)
+		return e.executeCommandHookWithWriter(w, hook, worktreePath, defaultWorkDir)
 	case config.HookTypeSymlink:
-		return e.executeSymlinkHookWithWriter(w, hook, worktreePath)
+		return e.executeSymlinkHookWithWriter(w, hook, sourceBase, destinationBase)
 	default:
 		return fmt.Errorf("unknown hook type: %s", hook.Type)
 	}
 }
 
-// executeCopyHookWithWriter executes a copy hook with output directed to writer
-func (e *Executor) executeCopyHookWithWriter(w io.Writer, hook *config.Hook, worktreePath string) error {
-	// Resolve source path (relative to repo root)
+// executeCopyHookWithWriter executes a copy hook with output directed to writer.
+func (e *Executor) executeCopyHookWithWriter(
+	w io.Writer,
+	hook *config.Hook,
+	sourceBase string,
+	destinationBase string,
+) error {
 	srcPath := hook.From
 	if !filepath.IsAbs(srcPath) {
-		srcPath = filepath.Join(e.repoRoot, srcPath)
+		srcPath = filepath.Join(sourceBase, srcPath)
 	}
 	srcPath = filepath.Clean(srcPath)
 	if !filepath.IsAbs(hook.From) {
-		if err := ensureWithinBase(e.repoRoot, srcPath); err != nil {
+		if err := ensureWithinBase(sourceBase, srcPath); err != nil {
 			return err
 		}
 	}
 
-	// Resolve destination path (relative to worktree)
 	dstPath := hook.To
 	if !filepath.IsAbs(dstPath) {
-		dstPath = filepath.Join(worktreePath, dstPath)
+		dstPath = filepath.Join(destinationBase, dstPath)
 	}
 	dstPath = filepath.Clean(dstPath)
 	if !filepath.IsAbs(hook.To) {
-		if err := ensureWithinBase(worktreePath, dstPath); err != nil {
+		if err := ensureWithinBase(destinationBase, dstPath); err != nil {
 			return err
 		}
 	}
@@ -115,8 +153,8 @@ func (e *Executor) executeCopyHookWithWriter(w io.Writer, hook *config.Hook, wor
 	}
 
 	// Log the copy operation to writer
-	relSrc, _ := filepath.Rel(e.repoRoot, srcPath)
-	relDst, _ := filepath.Rel(worktreePath, dstPath)
+	relSrc, _ := filepath.Rel(sourceBase, srcPath)
+	relDst, _ := filepath.Rel(destinationBase, dstPath)
 	if _, err := fmt.Fprintf(w, "  Copying: %s → %s\n", relSrc, relDst); err != nil {
 		return err
 	}
@@ -127,28 +165,31 @@ func (e *Executor) executeCopyHookWithWriter(w io.Writer, hook *config.Hook, wor
 	return e.copyFile(srcPath, dstPath)
 }
 
-// executeSymlinkHookWithWriter executes a symlink hook with output directed to writer
-func (e *Executor) executeSymlinkHookWithWriter(w io.Writer, hook *config.Hook, worktreePath string) error {
-	// Resolve source path (relative to repo root)
+// executeSymlinkHookWithWriter executes a symlink hook with output directed to writer.
+func (*Executor) executeSymlinkHookWithWriter(
+	w io.Writer,
+	hook *config.Hook,
+	sourceBase string,
+	destinationBase string,
+) error {
 	srcPath := hook.From
 	if !filepath.IsAbs(srcPath) {
-		srcPath = filepath.Join(e.repoRoot, srcPath)
+		srcPath = filepath.Join(sourceBase, srcPath)
 	}
 	srcPath = filepath.Clean(srcPath)
 	if !filepath.IsAbs(hook.From) {
-		if err := ensureWithinBase(e.repoRoot, srcPath); err != nil {
+		if err := ensureWithinBase(sourceBase, srcPath); err != nil {
 			return err
 		}
 	}
 
-	// Resolve destination path (relative to worktree)
 	dstPath := hook.To
 	if !filepath.IsAbs(dstPath) {
-		dstPath = filepath.Join(worktreePath, dstPath)
+		dstPath = filepath.Join(destinationBase, dstPath)
 	}
 	dstPath = filepath.Clean(dstPath)
 	if !filepath.IsAbs(hook.To) {
-		if err := ensureWithinBase(worktreePath, dstPath); err != nil {
+		if err := ensureWithinBase(destinationBase, dstPath); err != nil {
 			return err
 		}
 	}
@@ -176,8 +217,8 @@ func (e *Executor) executeSymlinkHookWithWriter(w io.Writer, hook *config.Hook, 
 	}
 
 	// Log the symlink operation to writer
-	relSrc, _ := filepath.Rel(e.repoRoot, srcPath)
-	relDst, _ := filepath.Rel(worktreePath, dstPath)
+	relSrc, _ := filepath.Rel(sourceBase, srcPath)
+	relDst, _ := filepath.Rel(destinationBase, dstPath)
 	if _, err := fmt.Fprintf(w, "  Symlinking: %s → %s\n", relSrc, relDst); err != nil {
 		return err
 	}
@@ -223,8 +264,13 @@ func ensureDistinctPaths(srcPath, dstPath string, srcInfo os.FileInfo) error {
 	return nil
 }
 
-// executeCommandHookWithWriter executes a command hook with output directed to writer
-func (e *Executor) executeCommandHookWithWriter(w io.Writer, hook *config.Hook, worktreePath string) error {
+// executeCommandHookWithWriter executes a command hook with output directed to writer.
+func (e *Executor) executeCommandHookWithWriter(
+	w io.Writer,
+	hook *config.Hook,
+	worktreePath string,
+	defaultWorkDir string,
+) error {
 	// Execute command using shell for unified command format
 	var cmd *exec.Cmd
 	if runtime.GOOS == windowsOS {
@@ -238,9 +284,9 @@ func (e *Executor) executeCommandHookWithWriter(w io.Writer, hook *config.Hook, 
 	// Set working directory
 	workDir := hook.WorkDir
 	if workDir == "" {
-		workDir = worktreePath
+		workDir = defaultWorkDir
 	} else if !filepath.IsAbs(workDir) {
-		workDir = filepath.Join(worktreePath, workDir)
+		workDir = filepath.Join(defaultWorkDir, workDir)
 	}
 	cmd.Dir = workDir
 

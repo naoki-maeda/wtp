@@ -40,6 +40,13 @@ hooks:
     - type: symlink
       from: ".bin"
       to: ".bin"
+  pre_remove:
+    - type: copy
+      from: ".env"
+      to: ".env.backup"
+  post_remove:
+    - type: command
+      command: "echo cleanup"
 `
 
 	err := os.WriteFile(configPath, []byte(configContent), 0644)
@@ -74,6 +81,14 @@ hooks:
 
 	if config.Hooks.PostCreate[2].Type != HookTypeSymlink {
 		t.Errorf("Expected third hook type 'symlink', got %s", config.Hooks.PostCreate[2].Type)
+	}
+
+	if len(config.Hooks.PreRemove) != 1 {
+		t.Errorf("Expected 1 pre-remove hook, got %d", len(config.Hooks.PreRemove))
+	}
+
+	if len(config.Hooks.PostRemove) != 1 {
+		t.Errorf("Expected 1 post-remove hook, got %d", len(config.Hooks.PostRemove))
 	}
 }
 
@@ -148,6 +163,18 @@ func TestSaveConfig(t *testing.T) {
 					To:   ".env",
 				},
 			},
+			PreRemove: []Hook{
+				{
+					Type: HookTypeCopy,
+					From: ".env",
+				},
+			},
+			PostRemove: []Hook{
+				{
+					Type:    HookTypeCommand,
+					Command: "echo cleanup",
+				},
+			},
 		},
 	}
 
@@ -174,6 +201,18 @@ func TestSaveConfig(t *testing.T) {
 
 	if loadedConfig.Defaults.BaseDir != config.Defaults.BaseDir {
 		t.Errorf("Expected base_dir %s, got %s", config.Defaults.BaseDir, loadedConfig.Defaults.BaseDir)
+	}
+
+	if len(loadedConfig.Hooks.PreRemove) != 1 {
+		t.Fatalf("Expected 1 pre-remove hook, got %d", len(loadedConfig.Hooks.PreRemove))
+	}
+
+	if got := loadedConfig.Hooks.PreRemove[0].To; got != ".env" {
+		t.Errorf("Expected pre-remove hook.To to default to %q, got %q", ".env", got)
+	}
+
+	if len(loadedConfig.Hooks.PostRemove) != 1 {
+		t.Fatalf("Expected 1 post-remove hook, got %d", len(loadedConfig.Hooks.PostRemove))
 	}
 }
 
@@ -447,17 +486,58 @@ func TestConfigApplyDefaults_CopyToDefaultsToFrom(t *testing.T) {
 					From: ".env",
 				},
 			},
+			PreRemove: []Hook{
+				{
+					Type: HookTypeCopy,
+					From: ".env.pre",
+				},
+			},
+			PostRemove: []Hook{
+				{
+					Type: HookTypeCopy,
+					From: ".env.post",
+				},
+			},
 		},
 	}
 
 	config.ApplyDefaults()
 
-	if err := config.Validate(); err != nil {
-		t.Fatalf("Expected no error but got: %v", err)
-	}
-
 	if got := config.Hooks.PostCreate[0].To; got != ".env" {
 		t.Errorf("Expected hook.To to default to %q, got %q", ".env", got)
+	}
+
+	if got := config.Hooks.PreRemove[0].To; got != ".env.pre" {
+		t.Errorf("Expected pre-remove hook.To to default to %q, got %q", ".env.pre", got)
+	}
+
+	if got := config.Hooks.PostRemove[0].To; got != "" {
+		t.Errorf("Expected post-remove hook.To to remain empty, got %q", got)
+	}
+}
+
+func TestConfigValidate_PostRemoveCopyRequiresTo(t *testing.T) {
+	config := &Config{
+		Version: "1.0",
+		Hooks: Hooks{
+			PostRemove: []Hook{
+				{
+					Type: HookTypeCopy,
+					From: ".env.post",
+				},
+			},
+		},
+	}
+
+	config.ApplyDefaults()
+
+	err := config.Validate()
+	if err == nil {
+		t.Fatal("Expected error but got nil")
+	}
+
+	if got := err.Error(); got != "invalid post_remove hook 1: copy hook requires 'to' field" {
+		t.Fatalf("Unexpected error: %s", got)
 	}
 }
 
@@ -576,5 +656,25 @@ func TestHasHooks(t *testing.T) {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestHasHookTypes(t *testing.T) {
+	config := &Config{
+		Hooks: Hooks{
+			PostCreate: []Hook{{Type: HookTypeCommand, Command: "echo post-create"}},
+			PreRemove:  []Hook{{Type: HookTypeCommand, Command: "echo pre-remove"}},
+			PostRemove: []Hook{{Type: HookTypeCommand, Command: "echo post-remove"}},
+		},
+	}
+
+	if !config.HasPostCreateHooks() {
+		t.Error("Expected post-create hooks to be detected")
+	}
+	if !config.HasPreRemoveHooks() {
+		t.Error("Expected pre-remove hooks to be detected")
+	}
+	if !config.HasPostRemoveHooks() {
+		t.Error("Expected post-remove hooks to be detected")
 	}
 }
