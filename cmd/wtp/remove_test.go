@@ -12,6 +12,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/satococoa/wtp/v2/internal/command"
+	"github.com/satococoa/wtp/v2/internal/config"
 )
 
 // ===== Command Structure Tests =====
@@ -295,6 +296,189 @@ func TestRemoveCommand_SuccessMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemoveCommand_ExecutesRemoveHooks(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("Skipping hook command test on Windows")
+	}
+
+	tempDir := t.TempDir()
+	mainRepoPath := filepath.Join(tempDir, "repo")
+	worktreePath := filepath.Join(tempDir, "worktrees", "feature", "remove-hooks")
+
+	assert.NoError(t, os.MkdirAll(mainRepoPath, 0o755))
+	assert.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(worktreePath, ".env"), []byte("secret"), 0o644))
+
+	cfg := &config.Config{
+		Version: config.CurrentVersion,
+		Defaults: config.Defaults{
+			BaseDir: "../worktrees",
+		},
+		Hooks: config.Hooks{
+			PreRemove: []config.Hook{
+				{
+					Type: config.HookTypeCopy,
+					From: ".env",
+					To:   "backups/remove-hooks.env",
+				},
+			},
+			PostRemove: []config.Hook{
+				{
+					Type:    config.HookTypeCommand,
+					Command: "pwd > post-remove-pwd.txt",
+				},
+			},
+		},
+	}
+	assert.NoError(t, config.SaveConfig(mainRepoPath, cfg))
+
+	worktreeList := fmt.Sprintf(
+		"worktree %s\nHEAD abc123\nbranch refs/heads/main\n\n"+
+			"worktree %s\nHEAD def456\nbranch refs/heads/feature/remove-hooks\n\n",
+		mainRepoPath,
+		worktreePath,
+	)
+
+	postRemoveOutput := filepath.Join(mainRepoPath, "post-remove-pwd.txt")
+	mockExec := &mockRemoveCommandExecutor{
+		results: []command.Result{
+			{Output: worktreeList, Error: nil},
+			{Output: "success", Error: nil},
+			{Output: "Deleted branch feature/remove-hooks", Error: nil},
+		},
+		onExecute: func(cmd command.Command, _ int) {
+			if len(cmd.Args) >= 2 && cmd.Args[0] == "branch" {
+				_, statErr := os.Stat(postRemoveOutput)
+				assert.NoError(t, statErr)
+			}
+		},
+	}
+
+	cmd := createRemoveTestCLICommand(t, map[string]any{"with-branch": true}, []string{"feature/remove-hooks"})
+	var buf bytes.Buffer
+
+	err := removeCommandWithCommandExecutor(
+		cmd, &buf, mockExec, mainRepoPath, "feature/remove-hooks", false, true, false,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, []command.Command{
+		{Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
+		{Name: "git", Args: []string{"worktree", "remove", worktreePath}},
+		{Name: "git", Args: []string{"branch", "-d", "feature/remove-hooks"}},
+	}, mockExec.executedCommands)
+
+	backupContent, readErr := os.ReadFile(filepath.Join(mainRepoPath, "backups", "remove-hooks.env"))
+	assert.NoError(t, readErr)
+	assert.Equal(t, "secret", string(backupContent))
+
+	postRemovePwd, readErr := os.ReadFile(postRemoveOutput)
+	assert.NoError(t, readErr)
+	assert.Contains(t, string(postRemovePwd), mainRepoPath)
+
+	output := buf.String()
+	assert.Contains(t, output, "Executing pre-remove hooks...")
+	assert.Contains(t, output, "Executing post-remove hooks...")
+	assert.Contains(t, output, "Removed worktree 'feature/remove-hooks'")
+	assert.Contains(t, output, "Removed branch 'feature/remove-hooks'")
+}
+
+func TestRemoveCommand_PreRemoveHookFailureStopsRemoval(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("Skipping hook command test on Windows")
+	}
+
+	tempDir := t.TempDir()
+	mainRepoPath := filepath.Join(tempDir, "repo")
+	worktreePath := filepath.Join(tempDir, "worktrees", "feature", "remove-failure")
+
+	assert.NoError(t, os.MkdirAll(mainRepoPath, 0o755))
+	assert.NoError(t, os.MkdirAll(worktreePath, 0o755))
+
+	cfg := &config.Config{
+		Version: config.CurrentVersion,
+		Defaults: config.Defaults{
+			BaseDir: "../worktrees",
+		},
+		Hooks: config.Hooks{
+			PreRemove: []config.Hook{
+				{
+					Type:    config.HookTypeCommand,
+					Command: "exit 1",
+				},
+			},
+		},
+	}
+	assert.NoError(t, config.SaveConfig(mainRepoPath, cfg))
+
+	worktreeList := fmt.Sprintf(
+		"worktree %s\nHEAD abc123\nbranch refs/heads/main\n\n"+
+			"worktree %s\nHEAD def456\nbranch refs/heads/feature/remove-failure\n\n",
+		mainRepoPath,
+		worktreePath,
+	)
+
+	mockExec := &mockRemoveCommandExecutor{
+		results: []command.Result{
+			{Output: worktreeList, Error: nil},
+		},
+	}
+
+	cmd := createRemoveTestCLICommand(t, map[string]any{}, []string{"feature/remove-failure"})
+	var buf bytes.Buffer
+
+	err := removeCommandWithCommandExecutor(
+		cmd, &buf, mockExec, mainRepoPath, "feature/remove-failure", false, false, false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to execute hook")
+	assert.Equal(t, []command.Command{
+		{Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
+	}, mockExec.executedCommands)
+	assert.Contains(t, buf.String(), "Executing pre-remove hooks...")
+}
+
+func TestRemoveCommand_InvalidConfigFallsBackToDefault(t *testing.T) {
+	tempDir := t.TempDir()
+	mainRepoPath := filepath.Join(tempDir, "repo")
+	worktreePath := filepath.Join(tempDir, "worktrees", "feature", "invalid-config")
+
+	assert.NoError(t, os.MkdirAll(mainRepoPath, 0o755))
+	assert.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	invalidConfig := []byte("hooks:\n  post_create:\n    - type: command\n")
+	assert.NoError(t, os.WriteFile(filepath.Join(mainRepoPath, config.ConfigFileName), invalidConfig, 0o600))
+
+	worktreeList := fmt.Sprintf(
+		"worktree %s\nHEAD abc123\nbranch refs/heads/main\n\n"+
+			"worktree %s\nHEAD def456\nbranch refs/heads/feature/invalid-config\n\n",
+		mainRepoPath,
+		worktreePath,
+	)
+
+	mockExec := &mockRemoveCommandExecutor{
+		results: []command.Result{
+			{Output: worktreeList, Error: nil},
+			{Output: "success", Error: nil},
+		},
+	}
+
+	cmd := createRemoveTestCLICommand(t, map[string]any{}, []string{"feature/invalid-config"})
+	var buf bytes.Buffer
+
+	err := removeCommandWithCommandExecutor(
+		cmd, &buf, mockExec, mainRepoPath, "feature/invalid-config", false, false, false,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, []command.Command{
+		{Name: "git", Args: []string{"worktree", "list", "--porcelain"}},
+		{Name: "git", Args: []string{"worktree", "remove", worktreePath}},
+	}, mockExec.executedCommands)
+	assert.NotContains(t, buf.String(), "Executing pre-remove hooks...")
+	assert.NotContains(t, buf.String(), "Executing post-remove hooks...")
 }
 
 // ===== Error Handling Tests =====
@@ -808,11 +992,18 @@ type mockRemoveCommandExecutor struct {
 	shouldFail       bool
 	errorMsg         string
 	callCount        int
+	onExecute        func(command.Command, int)
 }
 
 func (m *mockRemoveCommandExecutor) Execute(commands []command.Command) (*command.ExecutionResult, error) {
 	// Accumulate all commands instead of overwriting
 	m.executedCommands = append(m.executedCommands, commands...)
+
+	for _, cmd := range commands {
+		if m.onExecute != nil {
+			m.onExecute(cmd, m.callCount)
+		}
+	}
 
 	if m.shouldFail && m.callCount > 0 {
 		errorMsg := m.errorMsg

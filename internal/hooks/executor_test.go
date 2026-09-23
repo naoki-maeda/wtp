@@ -36,6 +36,20 @@ func TestExecutePostCreateHooks_NoHooks(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestExecutePreRemoveHooks_NilConfig(t *testing.T) {
+	executor := NewExecutor(nil, "/test/repo")
+	var buf bytes.Buffer
+	err := executor.ExecutePreRemoveHooks(&buf, "/test/worktree")
+	assert.NoError(t, err)
+}
+
+func TestExecutePostRemoveHooks_NilConfig(t *testing.T) {
+	executor := NewExecutor(nil, "/test/repo")
+	var buf bytes.Buffer
+	err := executor.ExecutePostRemoveHooks(&buf, "/test/worktree")
+	assert.NoError(t, err)
+}
+
 func requireSymlinkSupport(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS != "windows" {
@@ -1347,4 +1361,137 @@ func TestExecutePostCreateHooks_CopyFileWithSpecialCharacters(t *testing.T) {
 	dstContent, err := os.ReadFile(dstFile)
 	require.NoError(t, err)
 	assert.Equal(t, "special content", string(dstContent))
+}
+
+func TestExecuteRemoveHooks_CopyFile(t *testing.T) {
+	tests := []struct {
+		name            string
+		sourceInRepo    bool
+		from            string
+		to              string
+		content         string
+		expectedLogLine string
+		hooks           func(hook config.Hook) config.Hooks
+		execute         func(executor *Executor, w *bytes.Buffer, worktreePath string) error
+	}{
+		{
+			name:            "pre-remove copies from worktree to repo root",
+			sourceInRepo:    false,
+			from:            ".env",
+			to:              "backup/.env",
+			content:         "secret",
+			expectedLogLine: "Copying: .env → backup/.env",
+			hooks: func(hook config.Hook) config.Hooks {
+				return config.Hooks{PreRemove: []config.Hook{hook}}
+			},
+			execute: func(executor *Executor, w *bytes.Buffer, worktreePath string) error {
+				return executor.ExecutePreRemoveHooks(w, worktreePath)
+			},
+		},
+		{
+			name:            "post-remove copies within repo root",
+			sourceInRepo:    true,
+			from:            "cleanup.log",
+			to:              "archive/cleanup.log",
+			content:         "done",
+			expectedLogLine: "Copying: cleanup.log → archive/cleanup.log",
+			hooks: func(hook config.Hook) config.Hooks {
+				return config.Hooks{PostRemove: []config.Hook{hook}}
+			},
+			execute: func(executor *Executor, w *bytes.Buffer, worktreePath string) error {
+				return executor.ExecutePostRemoveHooks(w, worktreePath)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			repoRoot := filepath.Join(tempDir, "repo")
+			worktreeDir := filepath.Join(tempDir, "worktree")
+
+			require.NoError(t, os.MkdirAll(repoRoot, directoryPermissions))
+			require.NoError(t, os.MkdirAll(worktreeDir, directoryPermissions))
+
+			sourceDir := worktreeDir
+			if tt.sourceInRepo {
+				sourceDir = repoRoot
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(sourceDir, tt.from), []byte(tt.content), 0644))
+
+			cfg := &config.Config{
+				Hooks: tt.hooks(config.Hook{Type: config.HookTypeCopy, From: tt.from, To: tt.to}),
+			}
+
+			executor := NewExecutor(cfg, repoRoot)
+			var buf bytes.Buffer
+			err := tt.execute(executor, &buf, worktreeDir)
+			assert.NoError(t, err)
+
+			dstContent, err := os.ReadFile(filepath.Join(repoRoot, tt.to))
+			require.NoError(t, err)
+			assert.Equal(t, tt.content, string(dstContent))
+			assert.Contains(t, buf.String(), tt.expectedLogLine)
+		})
+	}
+}
+
+func TestExecutePreRemoveHooks_CommandUsesRepoRootByDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping command test on Windows")
+	}
+
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	worktreeDir := filepath.Join(tempDir, "worktree")
+
+	require.NoError(t, os.MkdirAll(repoRoot, directoryPermissions))
+	require.NoError(t, os.MkdirAll(worktreeDir, directoryPermissions))
+
+	cfg := &config.Config{
+		Hooks: config.Hooks{
+			PreRemove: []config.Hook{
+				{
+					Type:    config.HookTypeCommand,
+					Command: "pwd",
+				},
+			},
+		},
+	}
+
+	executor := NewExecutor(cfg, repoRoot)
+	var buf bytes.Buffer
+	err := executor.ExecutePreRemoveHooks(&buf, worktreeDir)
+	assert.NoError(t, err)
+	assert.Contains(t, buf.String(), repoRoot)
+}
+
+func TestExecutePostRemoveHooks_CommandUsesRepoRootByDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping command test on Windows")
+	}
+
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	worktreeDir := filepath.Join(tempDir, "worktree")
+
+	require.NoError(t, os.MkdirAll(repoRoot, directoryPermissions))
+	require.NoError(t, os.MkdirAll(worktreeDir, directoryPermissions))
+
+	cfg := &config.Config{
+		Hooks: config.Hooks{
+			PostRemove: []config.Hook{
+				{
+					Type:    config.HookTypeCommand,
+					Command: "pwd",
+				},
+			},
+		},
+	}
+
+	executor := NewExecutor(cfg, repoRoot)
+	var buf bytes.Buffer
+	err := executor.ExecutePostRemoveHooks(&buf, worktreeDir)
+	assert.NoError(t, err)
+	assert.Contains(t, buf.String(), repoRoot)
 }

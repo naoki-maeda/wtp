@@ -9,7 +9,7 @@ This document describes the current implementation shape of `wtp`.
   - `internal/command`: typed command builders and execution abstraction
   - `internal/git`: git repository/worktree operations and branch resolution
   - `internal/config`: `.wtp.yml` schema, defaults, validation, path resolution
-  - `internal/hooks`: post-create hook execution
+  - `internal/hooks`: lifecycle hook execution
   - `internal/errors`: user-facing error helpers
   - `internal/io`, `internal/testutil`: output and test helpers
 
@@ -56,10 +56,13 @@ Configuration file: `.wtp.yml`.
 - Hook types: `copy`, `command`, `symlink`
 - Copy hook default: for relative `from`, `to` defaults to `from`
 
-Hook execution (`internal/hooks`) runs post-create hooks in order and streams output.
+Hook execution (`internal/hooks`) runs lifecycle hooks in order and streams output.
 
 - Relative paths are constrained under repo/worktree boundaries.
-- Command hooks execute in the target worktree by default.
+- Hook path and working-directory behavior depends on lifecycle:
+  - `post_create`: `from` repo root, `to` new worktree, commands default to new worktree
+  - `pre_remove`: `from` target worktree, `to` repo root, commands default to repo root
+  - `post_remove`: `from`/`to`/commands use repo root, and copy hooks require explicit `to`
 - Hook command environment includes:
   - `GIT_WTP_WORKTREE_PATH`
   - `GIT_WTP_REPO_ROOT`
